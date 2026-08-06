@@ -64,6 +64,26 @@ export async function login(
   }
 }
 
+/** Log in with local administrator credentials when Microsoft SSO is enabled. */
+export async function adminLogin(
+  username: string,
+  password: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await apiFetch(apiUrl("/api/v1/auth/admin/login"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+      skipAuthRedirect: true,
+    });
+    if (res.ok) return { ok: true };
+    const data = await res.json().catch(() => ({}));
+    return { ok: false, error: extractDetail(data.detail) ?? "Login failed" };
+  } catch {
+    return { ok: false, error: "Could not reach the server" };
+  }
+}
+
 /**
  * Normalise a FastAPI error detail to a plain string.
  * FastAPI can return detail as a string (HTTPException) or as an array of

@@ -467,8 +467,7 @@ async def receive_codex_oauth_callback(
     )
 
 
-@router.get("/microsoft/login")
-async def microsoft_login(next: str | None = None) -> RedirectResponse:
+async def _start_microsoft_login(*, next: str | None) -> RedirectResponse:
     """Start the server-side Microsoft Entra ID authorization-code flow."""
     if not AUTH_ENABLED or not _microsoft_enabled():
         raise HTTPException(
@@ -498,6 +497,12 @@ async def microsoft_login(next: str | None = None) -> RedirectResponse:
         **_state_cookie_attrs(),
     )
     return response
+
+
+@router.get("/microsoft/login")
+async def microsoft_login(next: str | None = None) -> RedirectResponse:
+    """Start the server-side Microsoft Entra ID authorization-code flow."""
+    return await _start_microsoft_login(next=next)
 
 
 @router.get("/microsoft/callback")
@@ -635,6 +640,36 @@ async def login(body: LoginRequest, response: Response) -> dict:
         "role": result.role,
         "is_admin": result.role == "admin",
     }
+
+
+@router.post("/admin/login")
+async def admin_login(body: LoginRequest, response: Response) -> dict:
+    """Authenticate a local administrator alongside Microsoft SSO."""
+    if not AUTH_ENABLED:
+        return {"ok": True, "message": "Auth is disabled â€” no login required."}
+
+    if POCKETBASE_ENABLED:
+        authenticated = authenticate_pb(body.username, body.password)
+        if not authenticated:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect credentials")
+        payload, token = authenticated
+        if payload.role != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access required")
+        response.set_cookie(value=token, max_age=_COOKIE_MAX_AGE, **_cookie_attrs())
+    else:
+        payload = authenticate(body.username, body.password)
+        if not payload:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect credentials")
+        if payload.role != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access required")
+        response.set_cookie(
+            value=create_token(payload.username, payload.role, payload.user_id),
+            max_age=_COOKIE_MAX_AGE,
+            **_cookie_attrs(),
+        )
+
+    logger.info("Local administrator '%s' logged in", payload.username)
+    return {"ok": True, "user_id": payload.user_id, "username": payload.username, "role": "admin", "is_admin": True}
 
 
 @router.post("/logout")
