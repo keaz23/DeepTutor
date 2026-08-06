@@ -89,3 +89,17 @@ def test_ordinary_shared_profiles_stay_grantable(tmp_path, monkeypatch):
         ) == {"profile_id": CODEX_PROFILE, "model_id": "m-sol"}
     finally:
         reset_current_user(token)
+
+
+def test_first_shareable_model_is_automatic_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_access, "admin_catalog", lambda: _catalog(owner_bound=False))
+    monkeypatch.setattr(model_access, "load_grant", lambda _user_id=None: {"models": {"llm": []}})
+    token = set_current_user(make_user(tmp_path))
+    try:
+        granted = model_access.redacted_model_access()["llm"]
+        assert [(item["profile_id"], item["model_id"]) for item in granted] == [
+            (CODEX_PROFILE, "m-sol")
+        ]
+        assert model_access.has_capability_access("llm") is True
+    finally:
+        reset_current_user(token)

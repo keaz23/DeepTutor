@@ -49,6 +49,39 @@ def is_owner_bound(profile: dict[str, Any]) -> bool:
     return bool(profile.get("owner_bound"))
 
 
+def _default_llm_access(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the first shareable configured LLM model, if one exists.
+
+    A user without an explicit grant receives this default automatically.  The
+    selection stays dynamic so a newly configured deployment works for every
+    signed-in user without writing per-user grant records.  Owner-bound OAuth
+    profiles are deliberately skipped: their credentials belong to the person
+    who authenticated them and cannot be shared with other accounts.
+    """
+    profiles = catalog.get("services", {}).get("llm", {}).get("profiles", []) or []
+    for profile in profiles:
+        if not isinstance(profile, dict) or is_owner_bound(profile):
+            continue
+        profile_id = str(profile.get("id") or "")
+        for model in profile.get("models", []) or []:
+            if not isinstance(model, dict):
+                continue
+            model_id = str(model.get("id") or "")
+            if not profile_id or not model_id:
+                continue
+            return [
+                {
+                    "profile_id": profile_id,
+                    "model_id": model_id,
+                    "name": model.get("name") or model.get("model") or model_id,
+                    "model": model.get("model") or "",
+                    "source": "admin",
+                    "available": True,
+                }
+            ]
+    return []
+
+
 def redacted_model_access(user_id: str | None = None) -> dict[str, list[dict[str, Any]]]:
     user = get_current_user()
     if user_id is None:
@@ -56,7 +89,11 @@ def redacted_model_access(user_id: str | None = None) -> dict[str, list[dict[str
     grant = load_grant(user_id)
     catalog = admin_catalog()
     result: dict[str, list[dict[str, Any]]] = {"llm": []}
-    for item in grant.get("models", {}).get("llm", []) or []:
+    assignments = grant.get("models", {}).get("llm", []) or []
+    if not assignments:
+        result["llm"] = _default_llm_access(catalog)
+        return result
+    for item in assignments:
         profile_id = str(item.get("profile_id") or item.get("id") or "")
         profile = _profile_by_id(catalog, "llm", profile_id)
         if profile is not None and is_owner_bound(profile):
