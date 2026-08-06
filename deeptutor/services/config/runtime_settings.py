@@ -55,6 +55,12 @@ DEFAULT_AUTH_SETTINGS: dict[str, Any] = {
     "password_hash": "",
     "token_expire_hours": 24,
     "cookie_secure": False,
+    "provider": "local",
+    "microsoft_tenant_id": "",
+    "microsoft_client_id": "",
+    "microsoft_client_secret": "",
+    "microsoft_redirect_uri": "",
+    "microsoft_admin_object_ids": [],
 }
 
 DEFAULT_INTEGRATIONS_SETTINGS: dict[str, Any] = {
@@ -517,6 +523,12 @@ class RuntimeSettingsService:
             "AUTH_PASSWORD_HASH": auth["password_hash"],
             "AUTH_TOKEN_EXPIRE_HOURS": str(auth["token_expire_hours"]),
             "AUTH_COOKIE_SECURE": _bool_env(auth["cookie_secure"]),
+            "AUTH_PROVIDER": auth["provider"],
+            "MICROSOFT_TENANT_ID": auth["microsoft_tenant_id"],
+            "MICROSOFT_CLIENT_ID": auth["microsoft_client_id"],
+            "MICROSOFT_CLIENT_SECRET": auth["microsoft_client_secret"],
+            "MICROSOFT_REDIRECT_URI": auth["microsoft_redirect_uri"],
+            "MICROSOFT_ADMIN_OBJECT_IDS": ",".join(auth["microsoft_admin_object_ids"]),
             "NEXT_PUBLIC_AUTH_ENABLED": _bool_env(auth["enabled"]),
             # Consumed server-side by the Next.js middleware (web/proxy.ts) at
             # request time — NOT inlined into the browser bundle. The proxy
@@ -650,6 +662,18 @@ class RuntimeSettingsService:
             payload["token_expire_hours"] = value
         if value := self._process_env_value("AUTH_COOKIE_SECURE"):
             payload["cookie_secure"] = value
+        if value := self._process_env_value("AUTH_PROVIDER"):
+            payload["provider"] = value
+        if value := self._process_env_value("MICROSOFT_TENANT_ID"):
+            payload["microsoft_tenant_id"] = value
+        if value := self._process_env_value("MICROSOFT_CLIENT_ID"):
+            payload["microsoft_client_id"] = value
+        if value := self._process_env_value("MICROSOFT_CLIENT_SECRET"):
+            payload["microsoft_client_secret"] = value
+        if value := self._process_env_value("MICROSOFT_REDIRECT_URI"):
+            payload["microsoft_redirect_uri"] = value
+        if value := self._process_env_value("MICROSOFT_ADMIN_OBJECT_IDS"):
+            payload["microsoft_admin_object_ids"] = value.split(",")
         return self._normalize_auth(payload)
 
     def _apply_integrations_process_overrides(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -907,6 +931,12 @@ class RuntimeSettingsService:
         }
 
     def _normalize_auth(self, settings: dict[str, Any]) -> dict[str, Any]:
+        provider = _string(settings.get("provider")).lower() or "local"
+        if provider not in {"local", "microsoft"}:
+            provider = "local"
+        admin_ids = settings.get("microsoft_admin_object_ids") or []
+        if isinstance(admin_ids, str):
+            admin_ids = admin_ids.split(",")
         return {
             "version": 1,
             "enabled": _coerce_bool(settings.get("enabled"), False),
@@ -914,6 +944,14 @@ class RuntimeSettingsService:
             "password_hash": _string(settings.get("password_hash")),
             "token_expire_hours": max(1, _coerce_int(settings.get("token_expire_hours"), 24)),
             "cookie_secure": _coerce_bool(settings.get("cookie_secure"), False),
+            "provider": provider,
+            "microsoft_tenant_id": _string(settings.get("microsoft_tenant_id")),
+            "microsoft_client_id": _string(settings.get("microsoft_client_id")),
+            "microsoft_client_secret": _string(settings.get("microsoft_client_secret")),
+            "microsoft_redirect_uri": _string(settings.get("microsoft_redirect_uri")),
+            "microsoft_admin_object_ids": [
+                str(value).strip() for value in admin_ids if str(value).strip()
+            ],
         }
 
     def _normalize_integrations(self, settings: dict[str, Any]) -> dict[str, Any]:

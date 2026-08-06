@@ -3,6 +3,8 @@
 from contextvars import Token as _CtxToken
 import logging
 import re
+import secrets
+from urllib.parse import urlencode
 
 from fastapi import (
     APIRouter,
@@ -17,7 +19,7 @@ from fastapi import (
     WebSocket,
     status,
 )
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, field_validator
 
 from deeptutor.services.config import load_auth_settings
@@ -33,6 +35,7 @@ from deeptutor.multi_user.context import set_current_user, user_from_token_paylo
 from deeptutor.multi_user.paths import local_admin_user
 from deeptutor.services.auth import (
     AUTH_ENABLED,
+    AUTH_SECRET,
     POCKETBASE_ENABLED,
     TOKEN_EXPIRE_HOURS,
     TokenPayload,
@@ -51,6 +54,12 @@ from deeptutor.services.auth import (
 )
 from deeptutor.services.codex_auth.contracts import CodexAuthError
 from deeptutor.services.codex_auth.service import deliver_codex_oauth_callback
+from deeptutor.services.microsoft_auth import (
+    MicrosoftAuthError,
+    authenticate_callback as authenticate_microsoft_callback,
+    authorization_url as microsoft_authorization_url,
+    pkce_challenge,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +67,8 @@ router = APIRouter()
 
 _COOKIE_NAME = "dt_token"
 _COOKIE_MAX_AGE = TOKEN_EXPIRE_HOURS * 3600
+_MICROSOFT_STATE_COOKIE = "dt_microsoft_state"
+_MICROSOFT_STATE_MAX_AGE = 10 * 60
 
 
 def _cookie_attrs() -> dict:
@@ -76,6 +87,62 @@ def _cookie_attrs() -> dict:
         "samesite": _SAMESITE,
         "secure": _SECURE,
     }
+
+
+def _microsoft_enabled() -> bool:
+    return str(load_auth_settings().get("provider") or "local") == "microsoft"
+
+
+def _safe_next(value: str | None) -> str:
+    """Only redirect back to an in-app path after authentication."""
+    if value and value.startswith("/") and not value.startswith("//"):
+        return value
+    return "/"
+
+
+def _state_cookie_attrs() -> dict:
+    return {
+        "key": _MICROSOFT_STATE_COOKIE,
+        "httponly": True,
+        "samesite": "lax",
+        "secure": _SECURE,
+        "max_age": _MICROSOFT_STATE_MAX_AGE,
+    }
+
+
+def _encode_microsoft_state(
+    *, state: str, nonce: str, code_verifier: str, next_path: str
+) -> str:
+    from datetime import datetime, timedelta, timezone
+    from jose import jwt
+
+    return jwt.encode(
+        {
+            "state": state,
+            "nonce": nonce,
+            "code_verifier": code_verifier,
+            "next": next_path,
+            "exp": datetime.now(timezone.utc) + timedelta(seconds=_MICROSOFT_STATE_MAX_AGE),
+        },
+        AUTH_SECRET,
+        algorithm="HS256",
+    )
+
+
+def _decode_microsoft_state(value: str | None) -> dict | None:
+    from jose import JWTError, jwt
+
+    if not value:
+        return None
+    try:
+        payload = jwt.decode(value, AUTH_SECRET, algorithms=["HS256"])
+        if not all(
+            isinstance(payload.get(key), str) for key in ("state", "nonce", "code_verifier", "next")
+        ):
+            return None
+        return payload
+    except JWTError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +210,7 @@ class AuthStatusResponse(BaseModel):
     role: str | None = None
     is_admin: bool = False
     avatar: str = ""
+    provider: str = "local"
 
 
 class UserInfo(BaseModel):
@@ -399,6 +467,88 @@ async def receive_codex_oauth_callback(
     )
 
 
+@router.get("/microsoft/login")
+async def microsoft_login(next: str | None = None) -> RedirectResponse:
+    """Start the server-side Microsoft Entra ID authorization-code flow."""
+    if not AUTH_ENABLED or not _microsoft_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Microsoft SSO is not enabled.",
+        )
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+    try:
+        url = microsoft_authorization_url(
+            state=state, nonce=nonce, code_challenge=pkce_challenge(code_verifier)
+        )
+    except MicrosoftAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    response = RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+    response.set_cookie(
+        value=_encode_microsoft_state(
+            state=state,
+            nonce=nonce,
+            code_verifier=code_verifier,
+            next_path=_safe_next(next),
+        ),
+        **_state_cookie_attrs(),
+    )
+    return response
+
+
+@router.get("/microsoft/callback")
+async def microsoft_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    dt_microsoft_state: str | None = Cookie(default=None, alias=_MICROSOFT_STATE_COOKIE),
+) -> RedirectResponse:
+    """Validate Microsoft identity, then establish a normal DeepTutor session."""
+    saved_state = _decode_microsoft_state(dt_microsoft_state)
+    target = _safe_next(saved_state.get("next") if saved_state else None)
+    response: RedirectResponse
+    if not AUTH_ENABLED or not _microsoft_enabled() or not saved_state or not state:
+        response = RedirectResponse(
+            url="/login?error=microsoft_state", status_code=status.HTTP_302_FOUND
+        )
+    elif not secrets.compare_digest(state, saved_state["state"]):
+        response = RedirectResponse(
+            url="/login?error=microsoft_state", status_code=status.HTTP_302_FOUND
+        )
+    elif error or not code:
+        response = RedirectResponse(
+            url="/login?error=microsoft_cancelled", status_code=status.HTTP_302_FOUND
+        )
+    else:
+        try:
+            identity = await authenticate_microsoft_callback(
+                code=code,
+                nonce=saved_state["nonce"],
+                code_verifier=saved_state["code_verifier"],
+            )
+        except MicrosoftAuthError as exc:
+            logger.warning("Microsoft SSO callback failed: %s", exc)
+            response = RedirectResponse(
+                url=f"/login?{urlencode({'error': 'microsoft_failed', 'reason': exc.code})}",
+                status_code=status.HTTP_302_FOUND,
+            )
+        else:
+            token = create_token(identity.username, identity.role, identity.user_id)
+            response = RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
+            response.set_cookie(value=token, max_age=_COOKIE_MAX_AGE, **_cookie_attrs())
+            logger.info(
+                "Microsoft SSO login completed for %s (role=%r)", identity.username, identity.role
+            )
+    response.delete_cookie(
+        key=_MICROSOFT_STATE_COOKIE, httponly=True, samesite="lax", secure=_SECURE
+    )
+    return response
+
+
 @router.get("/status", response_model=AuthStatusResponse)
 async def auth_status(
     authorization: str | None = Header(default=None, alias="Authorization"),
@@ -413,6 +563,7 @@ async def auth_status(
             username="local",
             role="admin",
             is_admin=True,
+            provider="local",
         )
 
     token = _extract_token(authorization, dt_token)
@@ -430,6 +581,7 @@ async def auth_status(
         role=payload.role if payload else None,
         is_admin=payload.role == "admin" if payload else False,
         avatar=avatar,
+        provider="microsoft" if _microsoft_enabled() else "local",
     )
 
 
@@ -438,6 +590,11 @@ async def login(body: LoginRequest, response: Response) -> dict:
     """Validate credentials and set a JWT cookie."""
     if not AUTH_ENABLED:
         return {"ok": True, "message": "Auth is disabled — no login required."}
+    if _microsoft_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+            detail="Use Microsoft SSO to sign in.",
+        )
 
     if POCKETBASE_ENABLED:
         # PocketBase mode: email = username field for backwards-compat with the
@@ -506,6 +663,11 @@ async def register(body: RegisterRequest) -> dict:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Auth is disabled — registration is not available.",
+        )
+    if _microsoft_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+            detail="Accounts are managed by Microsoft Entra ID.",
         )
 
     if POCKETBASE_ENABLED:

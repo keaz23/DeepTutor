@@ -16,6 +16,8 @@ export interface AuthStatus {
   is_admin?: boolean;
   /** Avatar marker: "", "icon:<name>:<color>", or "img:<version>". */
   avatar?: string;
+  /** Selected server-side sign-in provider. */
+  provider?: "local" | "microsoft";
 }
 
 /**
