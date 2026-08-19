@@ -1,5 +1,6 @@
 {
   "/(admin)/admin/users/page": "/admin/users",
+  "/(auth)/login/admin/page": "/login/admin",
   "/(auth)/login/page": "/login",
   "/(auth)/register/page": "/register",
   "/(utility)/agents/page": "/agents",

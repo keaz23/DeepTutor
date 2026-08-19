@@ -1,5 +1,6 @@
 {
   "/(admin)/admin/users/page": "app/(admin)/admin/users/page.js",
+  "/(auth)/login/admin/page": "app/(auth)/login/admin/page.js",
   "/(auth)/login/page": "app/(auth)/login/page.js",
   "/(auth)/register/page": "app/(auth)/register/page.js",
   "/(utility)/agents/page": "app/(utility)/agents/page.js",

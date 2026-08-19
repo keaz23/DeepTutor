@@ -119,6 +119,12 @@
       "namedRegex": "^/login(?:/)?$"
     },
     {
+      "page": "/login/admin",
+      "regex": "^/login/admin(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/login/admin(?:/)?$"
+    },
+    {
       "page": "/memory",
       "regex": "^/memory(?:/)?$",
       "routeKeys": {},

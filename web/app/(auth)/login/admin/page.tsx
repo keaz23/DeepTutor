@@ -1,12 +1,12 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslation } from "react-i18next";
 import { adminLogin, fetchAuthStatus } from "@/lib/auth";
 
 /** Local break-glass login for the DeepTutor administrator. */
-export default function AdminLoginPage() {
+function AdminLoginPageContent() {
   const { t } = useTranslation();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -47,5 +47,13 @@ export default function AdminLoginPage() {
         <button type="submit" disabled={loading} className="w-full py-2.5 px-4 rounded-lg font-medium text-sm bg-[var(--primary)] text-[var(--primary-foreground)] disabled:opacity-50">{loading ? t("Signing in…") : t("Sign in as administrator")}</button>
       </form>
     </div>
+  );
+}
+
+export default function AdminLoginPage() {
+  return (
+    <Suspense fallback={<div>Loading sign in...</div>}>
+      <AdminLoginPageContent />
+    </Suspense>
   );
 }
